@@ -1,0 +1,1020 @@
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class RubiksCubeController : MonoBehaviour
+{
+    private RubiksCubeModel _model = null;
+
+    [SerializeField] private GameObject _cube = null;
+    [SerializeField] private Camera     _camera = null;
+
+    #region Cube Control Parameters
+    [Header("User Rubik's Cube Control")]
+    [SerializeField] private float      _rubiksAcceleration = 100.0f;
+    [SerializeField] private float      _rubiksMaxSpeed     = 200.0f;
+    [SerializeField] private float      _durationToStop     = 0.1f;
+    [SerializeField] private float      _faceRotationSpeed  = 10.0f;
+    [SerializeField] private float      _lockingTreshold    = 0.1f;
+
+    private Vector2                     _rubiksSpeed        = Vector2.zero;
+    private Vector2                     _rubiksLastSpeed    = Vector2.zero;
+    private float                       _rubiksLerpProgress = 0.0f;
+    private float                       _rubiksMaxSpeedSqr  = 0.0f;
+    #endregion
+
+    #region Camera Control Parameters
+    [Header("User Camera Control")]
+    [SerializeField] private Transform  _maxCameraPosition = null;
+    [SerializeField] private Transform  _minCameraPosition = null;
+    [SerializeField] private float      _cameraZoomSpeed = 0.2f;
+
+    private Vector3                     _newCameraPos = Vector3.zero;
+    private float                       _currZoom = 0.5f;
+    #endregion
+
+    [Header("Smooth Control")]
+    [SerializeField] private float _faceToNeutralRotationSpeed = 145.0f;
+    [SerializeField] private float _scrambleSpeed = 1300.0f;
+
+    private int         _numCubes = 3;
+    private GameObject  _clickedCube = null;
+    private Vector3     _positionOfClickedCube = Vector3.zero;
+    private Vector3     _normal = Vector3.zero;
+    private Vector3     _localNormal = Vector3.zero;
+    private Vector3     _localDirection1 = Vector3.zero;
+    private Vector3     _localDirection2 = Vector3.zero;
+    private Vector3     _rotation = Vector3.zero;
+    private Vector3     _mousePosInWorld   = Vector3.zero;
+    private Vector2     _mousePosOnScreen  = Vector2.zero;
+    private Vector2     _screenRotationDir = Vector2.zero;
+    private float       _userAngle = 0.0f;
+
+    private bool _isUserInputLocked = false;
+    private bool _isRotationLocked = false; 
+
+    Face _face = null;
+
+    [Header("Faces")]
+    [SerializeField] Sprite _white;
+    [SerializeField] Sprite _red;
+    [SerializeField] Sprite _orange;
+    [SerializeField] Sprite _blue;
+    [SerializeField] Sprite _green;
+    [SerializeField] Sprite _yellow;
+    [SerializeField] Color _colorInsideCube = new Color(0, 0, 0, 1);
+
+    private System.Random _random = null;
+
+    public delegate void NoParamDelegate();
+    public NoParamDelegate onCompletition;
+    public NoParamDelegate onScrambleEnd;
+
+    // Start is called before the first frame update
+    void Start()
+    {
+        _model = GetComponent<RubiksCubeModel>();
+
+        Time.timeScale = 1.0f;
+        _isRotationLocked = false;
+        _rubiksMaxSpeedSqr = _rubiksMaxSpeed * _rubiksMaxSpeed;
+
+        _random = new System.Random();
+
+        _face = new Face();
+        _face._gameObject = new GameObject("Face");
+        _face._gameObject.transform.parent = transform;
+
+        _newCameraPos = Vector3.Slerp(_minCameraPosition.position, _maxCameraPosition.position, _currZoom);
+        _camera.transform.position = _newCameraPos;
+    }
+
+    #region Cube Initialization
+    public void CreateCubes(int numCubes)
+    {
+        InitNewCubes(numCubes);
+
+        // Get the scale for each cube
+        Vector3 scale = _cube.transform.localScale;
+        scale /= (float)_numCubes;
+        // Also create the padding for the cubes so they're centered with their parent
+        float paddingX = scale.x * (_numCubes - 1) / 2.0f;
+        float paddingY = scale.y * (_numCubes - 1) / 2.0f;
+        float paddingZ = scale.z * (_numCubes - 1) / 2.0f;
+
+        int idTmp = 0;
+
+        // Create n*n*n cubes
+        for (int i = 0; i < _numCubes; ++i)
+        {
+            for (int j = 0; j < _numCubes; ++j)
+            {
+                for (int k = 0; k < _numCubes; ++k)
+                {
+                    // Get the position of the current cube
+                    float xPos = i * scale.x - paddingX;
+                    float yPos = j * scale.y - paddingY;
+                    float zPos = k * scale.z - paddingZ;
+
+                    // Create the cube at its location and set its parent its scale and name
+                    GameObject newObject = Instantiate(_cube, transform.position + new Vector3(xPos, yPos, zPos), Quaternion.identity);
+                    newObject.transform.parent = transform;
+                    newObject.transform.localScale = scale;
+                    newObject.name = "Cube" + i + j + k;
+
+                    Cube cube = newObject.GetComponent<Cube>();
+                    if (cube)
+                    {
+                        cube.Set(transform.position + new Vector3(xPos, yPos, zPos), ++idTmp, _colorInsideCube);
+                        SetFaces(ref cube, i, j, k, _numCubes - 1);
+
+                        _listCube[i, j, k] = cube;
+                    }
+                }
+            }
+        }
+    }
+
+    void InitNewCubes(int numCubes)
+    {
+        // Remove all the created cubes
+        if (_listCube != null)
+            for (int i = 0; i < _numCubes; i++)
+                for (int j = 0; j < _numCubes; j++)
+                    for (int k = 0; k < _numCubes; k++)
+                        Destroy(_listCube[i, j, k].gameObject);
+
+        // change the number of cubes
+        _numCubes = numCubes;
+        // Create the list
+        _listCube = new Cube[_numCubes, _numCubes, _numCubes];
+        // Reset the rotation
+        transform.rotation = Quaternion.identity;
+    }
+
+    void SetFaces(ref Cube cube, int i, int j, int k, int lastRow)
+    {
+        if (i == 0)
+            AddRed(ref cube);
+        else if (i == lastRow)
+            AddOrange(ref cube);
+
+        if (j == 0)
+            AddWhite(ref cube);
+        else if (j == lastRow)
+            AddYellow(ref cube);
+
+        if (k == 0)
+            AddBlue(ref cube);
+        else if (k == lastRow)
+            AddGreen(ref cube);
+    }
+
+    void AddWhite(ref Cube cube)
+    {
+        GameObject gameObject = new GameObject();
+        SpriteRenderer sr = gameObject.AddComponent<SpriteRenderer>();
+        gameObject.transform.parent = cube.transform;
+        cube._spriteList.Add(sr);
+
+        SetSprite(ref sr, ref _white, "White Face", new Vector3(0, -0.51f, 0), new Vector3(90, 0, 0));
+    }
+
+    void AddYellow(ref Cube cube)
+    {
+        GameObject gameObject = new GameObject();
+        SpriteRenderer sr = gameObject.AddComponent<SpriteRenderer>();
+        sr.transform.SetParent(cube.transform);
+        cube._spriteList.Add(sr);
+
+        SetSprite(ref sr, ref _yellow, "Yellow Face", new Vector3(0, 0.51f, 0), new Vector3(90, 0, 0));
+    }
+
+    void AddOrange(ref Cube cube)
+    {
+        GameObject gameObject = new GameObject();
+        SpriteRenderer sr = gameObject.AddComponent<SpriteRenderer>();
+        sr.transform.SetParent(cube.transform);
+        cube._spriteList.Add(sr);
+
+        SetSprite(ref sr, ref _orange, "Orange Face", new Vector3(0.51f, 0, 0), new Vector3(0, 90, 0));
+    }
+
+    void AddRed(ref Cube cube)
+    {
+        GameObject gameObject = new GameObject();
+        SpriteRenderer sr = gameObject.AddComponent<SpriteRenderer>();
+        sr.transform.SetParent(cube.transform);
+        cube._spriteList.Add(sr);
+
+        SetSprite(ref sr, ref _red, "Red Face", new Vector3(-0.51f, 0, 0), new Vector3(0, 90, 0));
+    }
+
+    void AddBlue(ref Cube cube)
+    {
+        GameObject gameObject = new GameObject();
+        SpriteRenderer sr = gameObject.AddComponent<SpriteRenderer>();
+        sr.transform.SetParent(cube.transform);
+        cube._spriteList.Add(sr);
+
+        SetSprite(ref sr, ref _blue, "Blue Face", new Vector3(0, 0, -0.51f), new Vector3(0, 0, 0));
+    }
+
+    void AddGreen(ref Cube cube)
+    {
+        GameObject gameObject = new GameObject();
+        SpriteRenderer sr = gameObject.AddComponent<SpriteRenderer>();
+        sr.transform.SetParent(cube.transform);
+        cube._spriteList.Add(sr);
+
+        SetSprite(ref sr, ref _green, "Green Face", new Vector3(0, 0, 0.51f), new Vector3(0, 0, 0));
+    }
+
+    void SetSprite(ref SpriteRenderer sr, ref Sprite sprite, string name, Vector3 locPosition, Vector3 rotation)
+    {
+        sr.sprite = sprite;
+        sr.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
+        sr.transform.rotation = Quaternion.Euler(rotation);
+        sr.transform.localPosition = locPosition;
+        sr.name = name;
+    }
+
+    // Update is called once per frame
+    void Update()
+    {
+        UpdateCameraMovement();
+
+        UpdateRotateCube();
+    }
+
+    void UpdateCameraMovement()
+    {
+        // If the mouse wheel moved
+        if (Input.GetAxis("Mouse ScrollWheel") != 0f)
+        {
+            // Get the mouse wheel movement
+            _currZoom += Input.GetAxis("Mouse ScrollWheel") * _cameraZoomSpeed;
+            _currZoom = Mathf.Clamp(_currZoom, 0, 1);
+
+            // Get the new position
+            _newCameraPos = Vector3.Slerp(_minCameraPosition.position, _maxCameraPosition.position, _currZoom);
+        }
+
+        // Lerp the camera to the new position
+        _camera.transform.position = Vector3.Slerp(_camera.transform.position, _newCameraPos, 0.2f);
+    }
+    #endregion
+
+    #region Scramble
+    public bool ScrambleCube(int iterations)
+    {
+        if (!_isUserInputLocked)
+        {
+            _isUserInputLocked = true;
+            StartCoroutine(ScrambleCubeCoroutine(iterations));
+
+            return true;
+        }
+
+        return false;
+    }
+
+    IEnumerator ScrambleCubeCoroutine(int iterations)
+    {
+        int idXCube, idYCube, idZCube, numTurn;
+        Vector3 rotation;
+        // Scramble the number of given iteration
+        for (int i = 0; i < iterations; ++i)
+        {
+            // Ge tteh values for the current scramble
+            GetScrambleValues(out idXCube, out idYCube, out idZCube, out rotation, out numTurn);
+
+            // Get the corresponding face
+            GetFace(ref _listCube[idXCube, idYCube, idZCube], rotation);
+
+            // Update the face in the model
+            UpdateCubePosInRubiksCubeArray(numTurn, rotation);
+
+            // Set the face children for the rotation
+            _face.SetCubesToChildren();
+
+            // Get the rotation to reach and rotate
+            Quaternion endQuat = Quaternion.AngleAxis(90 * numTurn, rotation);
+            yield return StartCoroutine(RotateBackToNormal(Quaternion.identity, endQuat, _scrambleSpeed));
+        }
+
+        _isUserInputLocked = false;
+        onScrambleEnd();
+    }
+
+    void GetScrambleValues(out int idXCube, out int idYCube, out int idZCube, out Vector3 rotation, out int numTurn)
+    {
+        // Get random id of the cube to rotate
+        idXCube = _random.Next(0, _numCubes);
+        idYCube = _random.Next(0, _numCubes);
+        idZCube = _random.Next(0, _numCubes);
+
+        // Get a random rotation
+        int idRotation = _random.Next(0, 3);
+        switch (idRotation)
+        {
+            case 0: rotation = Vector3.up; break;
+            case 1: rotation = Vector3.right; break;
+            default: rotation = Vector3.forward; break;
+        }
+
+        // Get a random between -2 and 2 while excluding 0
+        do
+        {
+            numTurn = _random.Next(-2, 3);
+        } while (numTurn == 0);
+    }
+    #endregion
+
+    void UpdateRotateCube()
+    {
+        UpdateRubiksRotation();
+
+        UpdateFacesRotation();
+    }
+
+    #region Rubik's Rotation
+    void UpdateRubiksRotation()
+    {
+        // Check for the right mouse click
+        if (Input.GetMouseButton(1))
+        {
+            UpdateRightMouse();
+        }
+        // If the right click is released
+        if (Input.GetMouseButtonUp(1))
+        {
+            SlowRubiksSpeed();
+        }
+
+        // If we need to lerp the speed to reach zero
+        if (_rubiksLerpProgress > 0)
+        {
+            UpdateCubeRotation();
+        }
+    }
+
+    void UpdateRightMouse()
+    {
+        // Get the movement for the horizontal and vertical axis
+        float hMove = -Input.GetAxis("Mouse X") * _rubiksAcceleration;
+        float yMove =  Input.GetAxis("Mouse Y") * _rubiksAcceleration;
+
+        if (!Mathf.Approximately(hMove, 0) || !Mathf.Approximately(yMove, 0))
+        {
+            // Update the speed 
+            _rubiksSpeed.x += hMove;
+            _rubiksSpeed.y += yMove;
+
+            _rubiksLastSpeed = _rubiksSpeed;
+
+            // Reset the lerp progress to keep the user movement while the right click is pressed
+            _rubiksLerpProgress = 1;
+        }
+        else
+        {
+            // If we are not moving the cube try to slow the speed
+            SlowRubiksSpeed();
+        }
+    }
+
+    void SlowRubiksSpeed()
+    {
+        // If the cube is rotating faster than the max speed
+        if (_rubiksSpeed.sqrMagnitude > _rubiksMaxSpeedSqr)
+        {
+            // Set the speed to max speed (+ the direction)
+            _rubiksSpeed = _rubiksSpeed.normalized * _rubiksMaxSpeed;
+            _rubiksLastSpeed = _rubiksSpeed;
+        }
+    }
+
+    void UpdateCubeRotation()
+    {
+        // Get quaternions for the rotation
+        // Rotate around up for the horizontal axis and right for the vertical axis
+        Quaternion quatH = Quaternion.AngleAxis(_rubiksSpeed.x * Time.deltaTime, Vector3.up);
+        Quaternion quatV = Quaternion.AngleAxis(_rubiksSpeed.y * Time.deltaTime, Vector3.right);
+
+        // Rotate the cube
+        transform.rotation = (quatH * quatV) * transform.rotation;
+
+        // Reduce the progression
+        _rubiksLerpProgress -= Time.deltaTime / _durationToStop;
+        if (_rubiksLerpProgress < 0)
+        {
+            _rubiksSpeed = Vector2.zero;
+            _rubiksLerpProgress = 0;
+        }
+        // Lerp the speed to reach zero
+        _rubiksSpeed = Vector2.Lerp(Vector2.zero, _rubiksLastSpeed, _rubiksLerpProgress);
+    }
+    #endregion
+
+    #region Faces Rotation
+    void UpdateFacesRotation()
+    {
+        // Do not update if a face is rotating back to a neutral position
+        if (!_isUserInputLocked)
+        {
+            // Check for left mouse click
+            if (Input.GetMouseButtonDown(0))
+            {
+                OnLeftMouseDown();
+            }
+            // If we release the left click or press the right click
+            else if (Input.GetMouseButtonUp(0) || Input.GetMouseButton(1))
+            {
+                OnLeftMouseUp();
+            }
+
+            // Check for the duration that the left click is hold 
+            if (Input.GetMouseButton(0))
+            {
+                UpdateLeftMouse();
+            }
+            // If the left click is realeased
+            else
+            {
+                UpdateReleasedLeftMouse();
+            }
+        }
+    }
+
+    void OnLeftMouseDown()
+    {
+        // Get the raycast of the item we are clicking in the world
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+
+        // If we are clicking on the a cube
+        if (Physics.Raycast(ray, out RaycastHit hit))
+        {
+            // Get the game object we are clicking
+            _clickedCube = hit.transform.gameObject;
+            _mousePosOnScreen = Input.mousePosition;
+
+            _normal = hit.normal;
+            _mousePosInWorld = hit.point;
+
+            GetPossibleDirection();
+        }
+    }
+
+    void GetPossibleDirection()
+    {
+        // Get the two possible direction that the player can try to rotate to
+
+        // Get up and right if the nomal is in the same direction forward
+        float dotProduct = Vector3.Dot(transform.forward, _normal);
+        if (Mathf.Approximately(dotProduct, 1.0f) || Mathf.Approximately(dotProduct, -1.0f))
+        {
+            _localNormal =     Vector3.forward * Mathf.Sign(dotProduct);
+            _localDirection1 = Vector3.right;
+            _localDirection2 = Vector3.up;
+        }
+        // Get forward and up if the nomal is in the same direction right
+        dotProduct = Vector3.Dot(transform.right, _normal);
+        if (Mathf.Approximately(dotProduct, 1.0f) || Mathf.Approximately(dotProduct, -1.0f))
+        {
+            _localNormal =     Vector3.right * Mathf.Sign(dotProduct);
+            _localDirection1 = Vector3.up;
+            _localDirection2 = Vector3.forward;
+        }
+        // Get forward and right if the nomal is in the same direction up
+        dotProduct = Vector3.Dot(transform.up, _normal);
+        if (Mathf.Approximately(dotProduct, 1.0f) || Mathf.Approximately(dotProduct, -1.0f))
+        {
+            _localNormal =     Vector3.up * Mathf.Sign(dotProduct);
+            _localDirection1 = Vector3.forward;
+            _localDirection2 = Vector3.right;
+        }
+
+        //_localNormal     = _hitGameObject.transform.worldToLocalMatrix * _normal;
+        //_localDirection1 = _hitGameObject.transform.worldToLocalMatrix * _worldDirection1;
+        //_localDirection2 = _hitGameObject.transform.worldToLocalMatrix * _worldDirection2;
+        //_localNormal.Normalize();
+        //_localDirection1.Normalize();
+        //_localDirection2.Normalize();
+    }
+
+    void OnLeftMouseUp()
+    {
+        // Change the color
+        _mousePosInWorld = Vector3.zero;
+        _localDirection1 = Vector3.zero;
+        _localDirection2 = Vector3.zero;
+
+        _isRotationLocked = false;
+    }
+
+    void UpdateLeftMouse()
+    {
+        // Check that we have clicked a cube
+        if (!_clickedCube)
+            return;
+        
+        if (!_isRotationLocked)
+        {
+            UpdateToLockRotation();
+        }
+        else
+        {
+            UpdateLockedRotation();
+        }
+    }
+
+    void UpdateToLockRotation()
+    {
+        // Get the raycast of the item we are clicking in the world
+        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+
+        // If we are clicking on the a cube
+        if (Physics.Raycast(ray, out RaycastHit hit))
+        {
+            // Get the hit point
+            Vector3 newHitPoint = hit.point;
+            Vector3 playerDirection = newHitPoint - _mousePosInWorld;
+
+            // If the player has traveled more than a threshold given
+            if (playerDirection.magnitude > _lockingTreshold)
+            {
+                LockRotation(ref playerDirection, ref newHitPoint);
+            }
+        }
+    }
+
+    void LockRotation(ref Vector3 playerDirection, ref Vector3 positionHit)
+    {
+        LockGetRotationAndScreenForward(ref playerDirection);
+
+        _isRotationLocked = true;
+        _userAngle = 0.0f;
+
+        CalcCenter(_rotation, _clickedCube.transform.position);
+        
+        Cube cubeClicked = _clickedCube.GetComponent<Cube>();
+
+        GetFace(ref cubeClicked, _rotation);
+        _face.SetCubesToChildren();
+    }
+
+    void LockGetRotationAndScreenForward(ref Vector3 playerDirection)
+    {
+        // Get the two dot products to know in which direction the player has the most moved
+        Vector3 worldDirection1 = transform.localToWorldMatrix * _localDirection1;
+        Vector3 worldDirection2 = transform.localToWorldMatrix * _localDirection2;
+        float dotPlayerDir1 = Mathf.Abs(Vector3.Dot(playerDirection, worldDirection1));
+        float dotPlayerDir2 = Mathf.Abs(Vector3.Dot(playerDirection, worldDirection2));
+
+        Vector3 worldDirection;
+        // If the player is moving towards direction 1
+        if (dotPlayerDir1 > dotPlayerDir2)
+        {
+            _rotation = Vector3.Cross(_localDirection1, _localNormal);
+            worldDirection = worldDirection1;
+        }
+        // If the player is moving towards direction 2
+        else
+        {
+            _rotation = Vector3.Cross(_localDirection2, _localNormal);
+            worldDirection = worldDirection2;
+        }
+        _rotation.Normalize();
+
+        // Get the point from the first mouse hit to the direction given
+        Vector3 pointForward = _mousePosInWorld + worldDirection;
+
+        // Get the direction on screen to get which direction is forward to rotate the cube
+        Vector3 pointForwardOnScreen = _camera.WorldToScreenPoint(pointForward);
+        _screenRotationDir = _mousePosOnScreen - new Vector2(pointForwardOnScreen.x, pointForwardOnScreen.y);
+        _screenRotationDir.Normalize();
+    }
+
+    void UpdateLockedRotation()
+    {
+        // Get the movement vector of the mouse during the frame
+        Vector2 frameDir = new Vector2(Input.GetAxis("Mouse X"), Input.GetAxis("Mouse Y"));
+
+        // Get the projection of the movement on the direction
+        float dotFrameScreenDir = Vector2.Dot(frameDir, _screenRotationDir);
+        Vector2 frameMovement = dotFrameScreenDir * _screenRotationDir;
+
+        // Get the horizontal movement using the projection
+        float hMove = frameMovement.magnitude * Mathf.Sign(dotFrameScreenDir) * _faceRotationSpeed;
+
+        // Update the amount of rotation that the user has moved
+        _userAngle += hMove;
+
+        // Rotate the cube
+        _face.RotateAxisAngle(_rotation, hMove);
+    }
+
+    void UpdateReleasedLeftMouse()
+    {
+        if (_clickedCube && !_isUserInputLocked)
+        {
+            // Update the model with the number of turn the player did
+            UpdateCubePosInRubiksCubeArray(Mathf.RoundToInt(_userAngle / 90) % 4, _rotation);
+
+            // Get the current rotation
+            Quaternion baseFaceRotation = _face._gameObject.transform.localRotation;
+            // Get rotation to the closest "90 degree angle"
+            Vector3 newRotationToReach = FindClosestAngle(baseFaceRotation.eulerAngles);
+
+            // Create a Quaternion from the rotation
+            Quaternion rotationToReach = Quaternion.Euler(newRotationToReach);
+
+            // Start the coroutine of going back
+            StartCoroutine(RotateBackToNormal(baseFaceRotation, rotationToReach, _faceToNeutralRotationSpeed));
+
+            _isUserInputLocked = true;
+
+        }
+    }
+
+    Vector3 FindClosestAngle(Vector3 currRotation)
+    {
+        // Scale the current rotation by the axis be are rotating around to reset only
+        Vector3 rotationDirection = Vector3.Scale(currRotation, _rotation);
+
+        if (!Mathf.Approximately(rotationDirection.x, 0))
+            currRotation.x = GetClosestAngle(currRotation.x);
+        else if (!Mathf.Approximately(rotationDirection.y, 0))
+            currRotation.y = GetClosestAngle(currRotation.y);
+        else if (!Mathf.Approximately(rotationDirection.z, 0))
+            currRotation.z = GetClosestAngle(currRotation.z);
+
+        return currRotation;
+    }
+
+    float GetClosestAngle(float angle)
+    {
+        float absAngle = Mathf.Abs(angle);
+        if (absAngle < 45.0f)
+            angle = 0;
+        else if (absAngle < 135.0f)
+            angle = 90;
+        else if (absAngle < 225.0f)
+            angle = 180;
+        else if (absAngle < 315.0f)
+            angle = -90;
+        else
+            angle = 0;
+
+        return angle;
+    }
+
+    IEnumerator RotateBackToNormal(Quaternion qStart, Quaternion qEnd, float rotationSpeed)
+    {
+        float progress = 0.0f;
+        float step = rotationSpeed / Quaternion.Angle(qStart, qEnd);
+        while (progress < 1)
+        {
+            progress += step * Time.deltaTime;
+
+            // Lerp between the base and end result
+            Quaternion rotation = Quaternion.Lerp(qStart, qEnd, progress);
+
+            // Rotate the face
+            _face._gameObject.transform.localRotation = rotation;
+
+            yield return 0;
+        }
+
+        // Set the rotation to the exact given rotation
+        _face._gameObject.transform.localRotation = qEnd;
+
+        ResetAfter();
+    }
+
+    void ResetAfter()
+    {
+        _face.SetCubesToParent(transform);
+        _face.Reset();
+        _userAngle = 0;
+
+        _isUserInputLocked = false;
+        _isRotationLocked = false;
+
+        // Reset the object that we were clicking
+        _clickedCube = null;
+
+        // Check if the cube is completed
+        if (CheckWinCondition())
+            onCompletition();
+    }
+    #endregion
+
+    void GetFace(ref Cube cube, Vector3 rotationVector)
+    {
+        int lastRow = _numCubes - 1;
+
+        _face._cubeInFace.Clear();
+
+        _positionOfClickedCube = GetPosOfCubeInListOfCube(ref cube);
+
+        if (rotationVector == Vector3.right || rotationVector == -Vector3.right)
+        {
+            //Take all cube in the face
+            for (int j = 0; j < _numCubes; j++)
+                for (int k = 0; k < _numCubes; k++)
+                    _face._cubeInFace.Add(_listCube[(int)_positionOfClickedCube.x, j, k]);
+        }
+        else if (rotationVector == Vector3.up || rotationVector == -Vector3.up)
+        {
+            //Take all cube in the face
+            for (int i = 0; i < _numCubes; i++)
+                for (int k = 0; k < _numCubes; k++)
+                    _face._cubeInFace.Add(_listCube[i, (int)_positionOfClickedCube.y, k]);
+        }
+        else if (rotationVector == Vector3.forward || rotationVector == -Vector3.forward)
+        {
+            //Take all cube in the face
+            for (int i = 0; i < _numCubes; i++)
+                for (int j = 0; j < _numCubes; j++)
+                    _face._cubeInFace.Add(_listCube[i, j, (int)_positionOfClickedCube.z]);
+        }
+    }
+
+    Vector3 GetPosOfCubeInListOfCube(ref Cube cube)
+    {
+        int lastRow = _numCubes - 1;
+
+        /* Optimisation : Check only cube on the outside of the rubiks cube */
+
+        /* browse on the face up and down */
+        for (int j = 0; j < _numCubes; ++j)
+        {
+            for (int k = 0; k < _numCubes; ++k)
+            {
+                if (cube == _listCube[0, j, k])
+                {
+                    return new Vector3(0, j, k );
+                }
+                else if (cube == _listCube[lastRow, j, k])
+                {
+                    return new Vector3( lastRow, j, k );
+                }
+            }
+        }
+
+        /* browse on the face right and left */
+        for (int i = 0; i < _numCubes; ++i)
+        {
+            for (int k = 0; k < _numCubes; ++k)
+            {
+                if (cube == _listCube[i, 0, k])
+                {
+                    return new Vector3(i, 0, k );
+                }
+                else if (cube == _listCube[i, lastRow, k])
+                {
+                    return new Vector3(i, lastRow, k );
+                }
+            }
+        }
+
+        /* browse on the face front and back */
+        for (int i = 0; i < _numCubes; ++i)
+        {
+            for (int j = 0; j < _numCubes; ++j)
+            {
+                if (cube == _listCube[i, j, 0])
+                {
+                    return new Vector3(i, j, 0 );
+                }
+                else if (cube == _listCube[i, j, lastRow])
+                { 
+                    return new Vector3(i, j, lastRow );
+                }
+            }
+        }
+
+        return new Vector3( 0, 0, 0 );
+    }
+
+    void CalcCenter(Vector3 normalRotation, Vector3 posHit)
+    {
+        Vector3 center = (Vector3.ProjectOnPlane(-posHit, normalRotation) + posHit);
+        _face._centerOfFace = center;
+    }
+
+    void UpdateCubePosInRubiksCubeArray(int numTurn, Vector3 rotation)
+    {
+        if (numTurn == 0)
+            return;
+
+        Vector3 currRot = rotation * Mathf.Sign(numTurn);
+
+        numTurn = Mathf.Abs(numTurn);        
+
+        /* Search Which rotation have been done, in order to Update The Rube Array */
+        if (currRot == Vector3.right)
+            TurnAroundRight(numTurn, false);
+        else if (currRot == -Vector3.right)
+            TurnAroundRight(numTurn, true);
+        else if (currRot == Vector3.up)
+            TurnAroundUp(numTurn, true);
+        else if (currRot == -Vector3.up)
+            TurnAroundUp(numTurn, false);
+        else if (currRot == Vector3.forward)
+            TurnAroundForward(numTurn, false);
+        else if (currRot == -Vector3.forward)
+            TurnAroundForward(numTurn, true);
+    }
+
+    void Swap4Cube(ref Cube cube1, ref Cube cube2, ref Cube cube3, ref Cube cube4, bool neg)
+    {
+        if (!neg)
+        {
+            /* swap 4 four in counterclockwise */
+            Cube tmp = cube4;
+            cube4 = cube3;
+            cube3 = cube2;
+            cube2 = cube1;
+            cube1 = tmp;
+        }
+        else
+        {
+            /* swap 4 four in clockwise */
+            Cube tmp = cube1;
+            cube1 = cube2;
+            cube2 = cube3;
+            cube3 = cube4;
+            cube4 = tmp;
+        }
+    }
+
+        bool CheckWinCondition()
+        {
+            Face up = new Face();
+            Face down = new Face();
+            Face right = new Face();
+            Face left = new Face();
+            Face back = new Face();
+            Face front = new Face();
+
+            int lastRow = _numCubes - 1;
+
+            /* Set the 6 faces of the cube in order to check if it's finish */
+            for (int i = 0; i <= lastRow; i++)
+        {
+            for (int j = 0; j <= lastRow; j++)
+            {
+                up._cubeInFace.Add(_listCube[i, j, 0]);
+                down._cubeInFace.Add(_listCube[i, j, lastRow]);
+            }
+        }
+
+        for (int i = 0; i <= lastRow; i++)
+        {
+            for (int k = 0; k <= lastRow; k++)
+            {
+                right._cubeInFace.Add(_listCube[i, 0, k]);
+                left._cubeInFace.Add(_listCube[i, lastRow, k]);
+            }
+        }
+
+        for (int j = 0; j <= lastRow; j++)
+        {
+            for (int k = 0; k <= lastRow; k++)
+            {
+                back._cubeInFace.Add(_listCube[0, j, k]);
+                front._cubeInFace.Add(_listCube[lastRow, j, k]);
+            }
+        }
+
+        /* check if each face are done */
+        if (up.CheckFaceDone() &&
+            down.CheckFaceDone() &&
+            right.CheckFaceDone() &&
+            left.CheckFaceDone() &&
+            back.CheckFaceDone() &&
+            front.CheckFaceDone())
+            return true;
+
+        /* all faces are done so Rubiks Cube is done */
+        return false;
+    }
+
+    void TurnAroundRight(int numTurn, bool neg)
+    {
+        int lastRow = _numCubes - 1;
+        int firstCube = 0;
+
+        int index = 0;
+        int TempNumOfCubePerSide = _numCubes;
+
+        while (TempNumOfCubePerSide > 1)
+        {
+            if (firstCube + index != lastRow)
+            {
+                //calc
+                for (int i = 0; i < numTurn; i++)
+                {
+
+                    Swap4Cube(ref _listCube[(int)_positionOfClickedCube.x, firstCube + index, firstCube],
+                              ref _listCube[(int)_positionOfClickedCube.x, lastRow, firstCube + index],
+                              ref _listCube[(int)_positionOfClickedCube.x, lastRow - index, lastRow],
+                              ref _listCube[(int)_positionOfClickedCube.x, firstCube, lastRow - index], neg);
+
+                    /*Debug.Log(new Vector3((int)_positionOfClickedCube.x, lastRow, firstCube + index));
+                    Debug.Log(new Vector3((int)_positionOfClickedCube.x, lastRow - index, lastRow));
+                    Debug.Log(new Vector3((int)_positionOfClickedCube.x, firstCube, lastRow - index));*/
+                }
+                index++;
+            }
+            else
+            {
+                TempNumOfCubePerSide -= 2;
+                firstCube++;
+                lastRow--;
+                index = 0;
+            }
+        }
+
+    }
+
+    void TurnAroundUp(int numTurn, bool neg)
+    {
+        int lastRow = _numCubes - 1;
+        int firstCube = 0;
+
+        int index = 0;
+        int TempNumOfCubePerSide = _numCubes;
+
+        while (TempNumOfCubePerSide > 1)
+        {
+            if (firstCube + index != lastRow)
+            {
+                //calc
+                for (int i = 0; i < numTurn; i++)
+                {
+                    /*Swap4Cube(ref _listCube[(int)_positionOfClickedCube.x, firstCube + index, firstCube],
+                              ref _listCube[(int)_positionOfClickedCube.x, lastRow, firstCube + index],
+                              ref _listCube[(int)_positionOfClickedCube.x, lastRow - index, lastRow],
+                              ref _listCube[(int)_positionOfClickedCube.x, firstCube, lastRow - index], neg);*/
+
+                    Swap4Cube(ref _listCube[firstCube + index, (int)_positionOfClickedCube.y, firstCube],
+                               ref _listCube[lastRow, (int)_positionOfClickedCube.y, firstCube + index],
+                                ref _listCube[lastRow - index, (int)_positionOfClickedCube.y, lastRow],
+                                ref _listCube[firstCube, (int)_positionOfClickedCube.y, lastRow - index], neg);
+                }
+
+                index++;
+            }
+            else
+            {
+                TempNumOfCubePerSide -= 2;
+                firstCube++;
+                lastRow--;
+                index = 0;
+            }
+        }
+
+    }
+
+    void TurnAroundForward(int numTurn, bool neg)
+    {
+        int lastRow = _numCubes - 1;
+        int firstCube = 0;
+
+        int index = 0;
+        int TempNumOfCubePerSide = _numCubes;
+
+        while (TempNumOfCubePerSide > 1)
+        {
+            if (firstCube + index != lastRow)
+            {
+                //calc
+                for (int i = 0; i < numTurn; i++)
+                {
+                    Swap4Cube(ref _listCube[firstCube + index, firstCube, (int)_positionOfClickedCube.z],
+                                ref _listCube[lastRow, firstCube + index, (int)_positionOfClickedCube.z],
+                               ref _listCube[lastRow - index, lastRow, (int)_positionOfClickedCube.z],
+                                ref _listCube[firstCube, lastRow - index, (int)_positionOfClickedCube.z], neg);
+
+                    /* Debug.Log(new Vector3(firstCube + index, firstCube, (int)_positionOfClickedCube.z));
+                     Debug.Log(new Vector3(lastRow, firstCube + index, (int)_positionOfClickedCube.z));
+                     Debug.Log(new Vector3(lastRow - index, lastRow, (int)_positionOfClickedCube.z));
+                     Debug.Log(new Vector3(firstCube, lastRow - index, (int)_positionOfClickedCube.z));*/
+                }
+
+                index++;
+            }
+            else
+            {
+                TempNumOfCubePerSide -= 2;
+                firstCube++;
+                lastRow--;
+                index = 0;
+            }
+        }
+    }
+}
+
